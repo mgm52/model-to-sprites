@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>model → sprites</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 13px/1.4 ui-monospace, Menlo, Consolas, monospace;
+    background: #111;
+    color: #ddd;
+    display: grid;
+    grid-template-columns: var(--sidebar-w, 280px) 5px 1fr;
+    height: 100vh;
+    --viewport-h: 340px;
+  }
+  aside {
+    border-right: 1px solid #2a2a2a;
+    padding: 12px;
+    overflow-y: auto;
+    background: #161616;
+    min-width: 0;
+  }
+  main {
+    display: grid;
+    grid-template-rows: var(--viewport-h) 5px minmax(0, 1fr);
+    min-width: 0;
+    min-height: 0;
+  }
+  .gutter {
+    background: #1f1f1f;
+    user-select: none;
+    transition: background 0.12s;
+  }
+  .gutter:hover, .gutter.dragging { background: #5b9eff; }
+  .gutter.v { cursor: col-resize; }
+  .gutter.h { cursor: row-resize; }
+  #viewport {
+    background:
+      linear-gradient(45deg, #1c1c1c 25%, transparent 25%) 0 0/16px 16px,
+      linear-gradient(-45deg, #1c1c1c 25%, transparent 25%) 0 8px/16px 16px,
+      linear-gradient(45deg, transparent 75%, #1c1c1c 75%) 8px -8px/16px 16px,
+      linear-gradient(-45deg, transparent 75%, #1c1c1c 75%) -8px 0/16px 16px,
+      #222;
+    position: relative;
+    min-height: 0;
+  }
+  #viewport canvas { display: block; width: 100%; height: 100%; }
+  #drop-overlay {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    pointer-events: none;
+    color: #888; font-size: 14px;
+    text-align: center;
+  }
+  #drop-overlay.active {
+    background: rgba(80, 140, 255, 0.15);
+    outline: 2px dashed #5b9eff;
+    color: #cfe1ff;
+    pointer-events: auto;
+  }
+  #output {
+    padding: 12px;
+    background: #0d0d0d;
+    overflow: auto;
+    min-height: 0;
+  }
+  #output canvas {
+    image-rendering: pixelated;
+    background:
+      linear-gradient(45deg, #1c1c1c 25%, transparent 25%) 0 0/12px 12px,
+      linear-gradient(-45deg, #1c1c1c 25%, transparent 25%) 0 6px/12px 12px,
+      linear-gradient(45deg, transparent 75%, #1c1c1c 75%) 6px -6px/12px 12px,
+      linear-gradient(-45deg, transparent 75%, #1c1c1c 75%) -6px 0/12px 12px;
+    border: 1px solid #333;
+  }
+  .output-row { display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; }
+  .preview-labels { display: flex; gap: 0; margin-bottom: 4px; }
+  .preview-labels > div {
+    text-align: center;
+    font-size: 10px;
+    color: #888;
+    line-height: 1.3;
+    flex-shrink: 0;
+  }
+  .preview-labels .arrow {
+    display: inline-block;
+    font-size: 16px;
+    color: #5b9eff;
+    line-height: 1;
+    transform-origin: 50% 50%;
+  }
+  .preview-legend { font-size: 10px; color: #666; margin-top: 6px; max-width: 720px; }
+  h1 { font-size: 13px; margin: 0 0 12px; color: #aaa; letter-spacing: 0.5px; }
+  h2 { font-size: 11px; margin: 16px 0 6px; color: #888; text-transform: uppercase; letter-spacing: 1px; }
+  label { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 4px 0; }
+  label > span:first-child { color: #999; }
+  input[type=number], input[type=text], select {
+    background: #0a0a0a; color: #ddd; border: 1px solid #333;
+    padding: 4px 6px; font: inherit; width: 80px; border-radius: 3px;
+  }
+  select { width: 100%; }
+  input[type=range] { width: 120px; }
+  input[type=checkbox] { accent-color: #5b9eff; }
+  button {
+    background: #2a2a2a; color: #ddd; border: 1px solid #444;
+    padding: 6px 10px; font: inherit; cursor: pointer; border-radius: 3px;
+    width: 100%; margin-top: 4px;
+  }
+  button:hover { background: #333; border-color: #555; }
+  button.primary { background: #2d4a7a; border-color: #4a72b0; color: #fff; }
+  button.primary:hover { background: #355790; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .row { display: flex; gap: 6px; }
+  .row > * { flex: 1; }
+  .file-line { font-size: 11px; color: #888; margin: 2px 0; word-break: break-all; }
+  .swatch { width: 22px; height: 22px; padding: 0; border: 1px solid #444; border-radius: 3px; }
+  .hint { font-size: 11px; color: #666; margin: 4px 0 8px; line-height: 1.5; }
+  .render-footer {
+    position: sticky;
+    bottom: -12px;
+    margin: 12px -12px -12px;
+    padding: 10px 12px 12px;
+    background: linear-gradient(to bottom, rgba(22,22,22,0) 0%, #161616 12px);
+    border-top: 1px solid #2a2a2a;
+  }
+  .render-footer h2 { margin-top: 4px; }
+  .preset-list { display: flex; flex-direction: column; gap: 4px; }
+  .preset-list button { font-size: 12px; padding: 4px 8px; text-align: left; }
+  .preset-list .empty { font-size: 11px; color: #666; padding: 4px 0; }
+</style>
+</head>
+<body>
+
+<aside>
+  <h1>MODEL → SPRITES</h1>
+
+  <h2>Model</h2>
+  <button id="pick-model">Choose model file…</button>
+  <p class="hint">.glb / .gltf / .fbx — drag onto viewport too</p>
+  <div id="model-info" class="file-line">no model loaded</div>
+
+  <h2>Animation clip</h2>
+  <select id="clip-select"><option>—</option></select>
+  <button id="pick-anim">Add clip from file…</button>
+  <p class="hint">Picking a "+ load: …" entry fetches that preset from <code>maximo_animations/</code> and merges its clips. Bone names must match the model's rig.</p>
+  <label><span>Trim start %</span><input id="trim-start" type="number" value="0" step="1" min="0" max="100"></label>
+  <label><span>Trim end %</span><input id="trim-end" type="number" value="100" step="1" min="0" max="100"></label>
+
+  <h2>Camera</h2>
+  <label><span>Pitch (°)</span><input id="pitch" type="number" value="30" step="1" min="0" max="89"></label>
+  <label><span>Distance</span><input id="distance" type="number" value="1.5" step="0.05" min="0.5" max="10"></label>
+  <label><span>Vertical offset</span><input id="vshift" type="number" value="0" step="0.05"></label>
+  <label><span>Projection</span>
+    <select id="projection" style="width:120px">
+      <option value="ortho" selected>Orthographic</option>
+      <option value="persp">Perspective</option>
+    </select>
+  </label>
+  <label><span>Rest forward</span>
+    <select id="rest-forward" style="width:120px">
+      <option value="+Z" selected>+Z (toward back)</option>
+      <option value="-Z">−Z (toward camera)</option>
+      <option value="+X">+X (right)</option>
+      <option value="-X">−X (left)</option>
+    </select>
+  </label>
+
+  <h2>Sprite</h2>
+  <label><span>Size (px)</span><input id="size" type="number" value="64" step="8" min="8" max="512"></label>
+  <label><span>Directions</span><input id="dirs" type="number" value="8" step="1" min="1" max="32"></label>
+  <label><span>Frames / dir</span><input id="frames" type="number" value="8" step="1" min="1" max="64"></label>
+  <label><span>Playback FPS</span><input id="fps" type="number" value="10" step="1" min="1" max="60"></label>
+  <label><span>Start angle (°)</span><input id="angle0" type="number" value="0" step="15"></label>
+  <label><span>CW direction</span><input id="cw" type="checkbox" checked></label>
+  <label><span>Layout</span>
+    <select id="layout" style="width:140px">
+      <option value="dir-rows" selected>Rows = directions</option>
+      <option value="dir-cols">Cols = directions</option>
+    </select>
+  </label>
+  <label><span>Auto-crop</span><input id="autocrop" type="checkbox" checked></label>
+  <label><span>Crop padding (px)</span><input id="cropPad" type="number" value="2" step="1" min="0" max="32"></label>
+  <label><span>Background</span><input id="bg-on" type="checkbox"></label>
+  <label><span>Bg color</span><input id="bg" type="color" value="#000000" class="swatch"></label>
+
+  <div class="render-footer">
+    <h2>Render</h2>
+    <button id="render" class="primary" disabled>Render spritesheet</button>
+    <button id="download" disabled>Download PNG</button>
+    <button id="download-meta" disabled>Download JSON</button>
+  </div>
+</aside>
+<div class="gutter v" id="gutter-x"></div>
+<main>
+  <div id="viewport">
+    <div id="drop-overlay">drop .glb / .gltf / .fbx here</div>
+  </div>
+  <div class="gutter h" id="gutter-y"></div>
+  <div id="output">
+    <div class="output-row">
+      <div>
+        <h2 id="preview-label">Preview</h2>
+        <div id="preview-labels" class="preview-labels"></div>
+        <canvas id="preview" width="1" height="1"></canvas>
+        <div class="preview-legend">Arrows show walk direction on a top-down map (↑ = north). If the silhouettes don't match the arrows, change <b>Rest forward</b> in the Camera section — pick the axis your model's face points along in its bind pose.</div>
+      </div>
+      <div>
+        <h2 id="output-label">Spritesheet (none yet)</h2>
+        <canvas id="sheet" width="1" height="1"></canvas>
+      </div>
+    </div>
+  </div>
+</main>
+
+<input type="file" id="model-input" accept=".glb,.gltf,.fbx" hidden>
+<input type="file" id="anim-input" accept=".glb,.gltf,.fbx" hidden>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.161.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.161.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module" src="./main.js"></script>
+
+</body>
+</html>
