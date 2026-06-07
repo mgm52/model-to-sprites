@@ -25,6 +25,13 @@ const fill = new THREE.DirectionalLight(0x88aaff, 0.4);
 fill.position.set(-3, 2, -2);
 scene.add(fill);
 
+// Brightness slider scales all lights — helps assets with dark textures.
+const BASE_LIGHTS = [[hemi, 0.7], [key, 1.2], [fill, 0.4]];
+$('brightness').addEventListener('input', () => {
+  const v = parseFloat($('brightness').value) || 1;
+  for (const [light, base] of BASE_LIGHTS) light.intensity = base * v;
+});
+
 // Two cameras; we swap based on UI.
 let camera = makeOrtho();
 function makeOrtho() {
@@ -63,8 +70,126 @@ const clock = new THREE.Clock();
 
 // --- loading -------------------------------------------------------------
 
-const gltfLoader = new GLTFLoader();
-const fbxLoader = new FBXLoader();
+// Textures supplied alongside the model (separate-folder assets). Keyed by
+// lowercased basename; loader texture requests are redirected here.
+const textureFiles = new Map(); // basename -> object URL
+
+function registerTextureFile(file) {
+  const url = URL.createObjectURL(file);
+  const old = textureFiles.get(file.name.toLowerCase());
+  if (old) URL.revokeObjectURL(old);
+  textureFiles.set(file.name.toLowerCase(), url);
+}
+
+function resolveTextureURL(url) {
+  if (textureFiles.size === 0 || url.startsWith('blob:') || url.startsWith('data:')) return url;
+  const base = decodeURIComponent(url.split(/[/\\]/).pop()).toLowerCase();
+  // Exact basename, then jpg/jpeg swap, then same stem with any extension.
+  if (textureFiles.has(base)) return textureFiles.get(base);
+  const swapped = base.endsWith('.jpg') ? base.replace(/\.jpg$/, '.jpeg')
+    : base.endsWith('.jpeg') ? base.replace(/\.jpeg$/, '.jpg') : null;
+  if (swapped && textureFiles.has(swapped)) return textureFiles.get(swapped);
+  const stem = base.replace(/\.[^.]+$/, '.');
+  for (const [name, blobURL] of textureFiles) {
+    if (name.startsWith(stem)) return blobURL;
+  }
+  console.warn(`No dropped texture matches "${base}" — have: ${[...textureFiles.keys()].join(', ')}`);
+  return url;
+}
+
+// Most color-looking registered texture, for the rescue pass below.
+function pickColorTextureURL() {
+  const score = (n) => /color|diffuse|albedo|base/.test(n) ? 0
+    : /normal|rough|metal|occlu|spec|bump|height|ao\b/.test(n) ? 2 : 1;
+  const names = [...textureFiles.keys()].sort((a, b) => score(a) - score(b));
+  return names.length && score(names[0]) < 2 ? textureFiles.get(names[0]) : null;
+}
+
+// If the model's texture requests all failed (e.g. the FBX references names
+// that don't match the dropped files, or never requested them at all),
+// manually apply the dropped color map.
+function textureRescue(object) {
+  if (model !== object) return true; // replaced in the meantime — stop checking
+  const all = [];
+  object.traverse((o) => {
+    const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+    all.push(...mats);
+  });
+  if (all.some((m) => m.map?.image)) return true; // at least one map works — leave it be
+  const url = pickColorTextureURL();
+  if (!url) return true;
+  const tex = new THREE.TextureLoader().load(url, downsizeTexture);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  for (const m of all) {
+    m.map = tex;
+    if (m.color) m.color.setHex(0xffffff);
+    m.needsUpdate = true;
+  }
+  console.warn(`Texture rescue: applied dropped color texture to ${all.length} material(s)`);
+  toast('Model textures failed to resolve — applied the dropped color texture as a fallback');
+  return true;
+}
+
+// Huge textures (8K scans) can silently fail to upload on VRAM-constrained
+// GPUs — WebGL then samples them as black. Downscale to something sane.
+const MAX_TEX_DIM = 2048;
+const TEX_SLOTS = ['map', 'aoMap', 'normalMap', 'roughnessMap', 'metalnessMap', 'specularMap', 'emissiveMap', 'bumpMap'];
+
+function downsizeTexture(tex) {
+  const img = tex?.image;
+  if (!img || !(img.width > MAX_TEX_DIM || img.height > MAX_TEX_DIM)) return;
+  const scale = MAX_TEX_DIM / Math.max(img.width, img.height);
+  const c = document.createElement('canvas');
+  c.width = Math.round(img.width * scale);
+  c.height = Math.round(img.height * scale);
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  tex.image = c;
+  tex.needsUpdate = true;
+  console.warn(`Downscaled ${img.width}×${img.height} texture to ${c.width}×${c.height} for reliable GPU upload`);
+}
+
+function downsizeModelTextures(object) {
+  object.traverse((o) => {
+    const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+    for (const m of mats) for (const slot of TEX_SLOTS) downsizeTexture(m[slot]);
+  });
+}
+
+function dumpDiagnostics(object, tag) {
+  const lines = [];
+  object.traverse((o) => {
+    const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+    mats.forEach((m, i) => {
+      const map = m.map ? (m.map.image ? `${m.map.image.width}x${m.map.image.height}` : 'NO-IMAGE') : 'none';
+      const normals = o.geometry ? String(!!o.geometry.attributes.normal) : '—';
+      lines.push(`${m.type} color=#${m.color?.getHexString?.() ?? '?'} map=${map} normals=${normals}`);
+    });
+  });
+  console.log(`[diag ${tag}] lights=${[hemi, key, fill].map((l) => l.intensity.toFixed(2)).join('/')} :: ${lines.join(' | ')}`);
+}
+
+function scheduleTextureRescue(object) {
+  // Texture images arrive asynchronously — re-check a few times.
+  for (const ms of [500, 1500, 3000, 6000, 10000]) {
+    setTimeout(() => { if (model === object) downsizeModelTextures(object); }, ms);
+  }
+  setTimeout(() => dumpDiagnostics(object, '+2s'), 2000);
+  setTimeout(() => dumpDiagnostics(object, '+8s'), 8000);
+  if (!textureFiles.size) return;
+  setTimeout(() => textureRescue(object), 4000);
+  setTimeout(() => textureRescue(object), 9000);
+}
+
+const loadingManager = new THREE.LoadingManager();
+loadingManager.setURLModifier(resolveTextureURL);
+// Missing textures (e.g. maps the asset didn't ship) shouldn't be fatal.
+loadingManager.onError = (url) => console.warn(`Texture not found: ${url}`);
+
+const gltfLoader = new GLTFLoader(loadingManager);
+const fbxLoader = new FBXLoader(loadingManager);
+
+const IMAGE_RE = /\.(png|jpe?g|webp|gif|bmp|avif)$/i;
+const MODEL_RE = /\.(glb|gltf|fbx)$/i;
 
 async function loadFile(file) {
   const ext = file.name.split('.').pop().toLowerCase();
@@ -75,6 +200,7 @@ async function loadFile(file) {
       return { object: gltf.scene, animations: gltf.animations || [] };
     } else if (ext === 'fbx') {
       const obj = await fbxLoader.loadAsync(url);
+      fixBlackDiffuse(obj);
       return { object: obj, animations: obj.animations || [] };
     } else {
       throw new Error(`Unsupported extension: .${ext}`);
@@ -82,6 +208,19 @@ async function loadFile(file) {
   } finally {
     URL.revokeObjectURL(url);
   }
+}
+
+// Some FBX exports (e.g. Sketchfab conversions) set a black diffuse color
+// alongside a diffuse map, and/or ship geometry without normals; either way
+// lit materials render the model solid black.
+function fixBlackDiffuse(object) {
+  object.traverse((o) => {
+    const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+    for (const m of mats) {
+      if (m.map && m.color?.getHex() === 0x000000) m.color.setHex(0xffffff);
+    }
+    if (o.geometry && !o.geometry.attributes.normal) o.geometry.computeVertexNormals();
+  });
 }
 
 async function setModelFromFile(file) {
@@ -131,22 +270,34 @@ async function setModelFromFile(file) {
     mixer = new THREE.AnimationMixer(model);
     playClip(clips[0]);
   }
-  $('model-info').textContent = `${file.name} — ${clips.length} clip(s)`;
+  const texNote = textureFiles.size ? ` · ${textureFiles.size} texture(s)` : '';
+  $('model-info').textContent = `${file.name} — ${clips.length} clip(s)${texNote}`;
   refreshClipDropdown();
   updateCameraFromUI();
   $('render').disabled = false;
+  document.body.classList.add('has-model');
+  scheduleTextureRescue(object);
+  if (clips.length) {
+    toast(`Loaded ${file.name} — ${clips.length} clip(s)`);
+  } else {
+    $('frames').value = 1; // static model: extra frames would be identical
+    toast(`Loaded ${file.name} — no animation (static); frames per direction set to 1`);
+  }
 }
 
 async function addClipsFromFile(file) {
-  if (!model || !mixer) {
-    alert('Load a rigged model first, then add clips.');
+  if (!model) {
+    toast('Load a model first, then add clips.', true);
     return;
   }
-  const { object, animations } = await loadFile(file);
+  const { animations } = await loadFile(file);
   if (!animations.length) {
-    alert('No animations found in that file.');
+    // Not a clip file — treat it as a replacement model instead of erroring.
+    toast(`No animation clips in ${file.name} — loading it as the model`);
+    await setModelFromFile(file);
     return;
   }
+  if (!mixer) mixer = new THREE.AnimationMixer(model);
   const baseName = file.name.replace(/\.[^.]+$/, '');
   renameGenericClips(animations, baseName);
   for (const c of animations) clips.push(c);
@@ -168,6 +319,13 @@ function refreshClipDropdown() {
     return;
   }
   sel.disabled = false;
+  if (!clips.length) {
+    // Selected by default so a preset entry isn't misleadingly shown as active.
+    const o = document.createElement('option');
+    o.value = '-1';
+    o.textContent = '(static — no animation)';
+    sel.appendChild(o);
+  }
   clips.forEach((c, i) => {
     const o = document.createElement('option');
     o.value = String(i);
@@ -182,12 +340,6 @@ function refreshClipDropdown() {
     o.value = `preset:${i}`;
     o.textContent = `+ load: ${name.replace(/\.[^.]+$/, '')}`;
     sel.appendChild(o);
-  }
-  if (!clips.length && presetFilenames.length === 0) {
-    const o = document.createElement('option');
-    o.textContent = '— no clips —';
-    sel.appendChild(o);
-    sel.disabled = true;
   }
 }
 
@@ -323,7 +475,7 @@ function trimRange(duration) {
 $('pick-model').addEventListener('click', () => $('model-input').click());
 $('pick-anim').addEventListener('click', () => $('anim-input').click());
 $('model-input').addEventListener('change', (e) => {
-  if (e.target.files[0]) setModelFromFile(e.target.files[0]).catch(showErr);
+  if (e.target.files.length) handleFiles([...e.target.files]).catch(showErr);
 });
 $('anim-input').addEventListener('change', (e) => {
   if (e.target.files[0]) addClipsFromFile(e.target.files[0]).catch(showErr);
@@ -343,16 +495,74 @@ const overlay = $('drop-overlay');
   })
 );
 viewport.addEventListener('drop', (e) => {
-  const f = e.dataTransfer?.files?.[0];
-  if (!f) return;
-  // First drop becomes the model; subsequent drops add animation clips.
-  if (!model) setModelFromFile(f).catch(showErr);
-  else addClipsFromFile(f).catch(showErr);
+  collectDroppedFiles(e.dataTransfer).then(handleFiles).catch(showErr);
 });
+
+// Walks dropped items, descending into directories so a whole asset folder
+// (model + separate textures/) can be dropped at once.
+async function collectDroppedFiles(dt) {
+  const entries = [...(dt?.items || [])]
+    .map((it) => it.webkitGetAsEntry?.())
+    .filter(Boolean);
+  if (entries.length === 0) return [...(dt?.files || [])];
+  const files = [];
+  async function walk(entry) {
+    if (entry.isFile) {
+      files.push(await new Promise((res, rej) => entry.file(res, rej)));
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      let batch;
+      do {
+        batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+        for (const child of batch) await walk(child);
+      } while (batch.length > 0);
+    }
+  }
+  for (const entry of entries) await walk(entry);
+  return files;
+}
+
+async function handleFiles(files) {
+  // Register textures first so they're resolvable when the model loads.
+  const images = files.filter((f) => IMAGE_RE.test(f.name));
+  images.forEach(registerTextureFile);
+  const models = files.filter((f) => MODEL_RE.test(f.name));
+  if (!models.length) {
+    if (images.length) toast(`Registered ${images.length} texture(s) — now drop the model that uses them`);
+    else toast('No .glb / .gltf / .fbx or texture files found in that drop', true);
+    return;
+  }
+  try {
+    for (const f of models) {
+      setBusy(`Loading ${f.name}`);
+      // First model becomes the model; subsequent ones add animation clips.
+      if (!model) await setModelFromFile(f);
+      else await addClipsFromFile(f);
+    }
+  } finally {
+    setBusy(null);
+  }
+}
+
+let toastTimer;
+function toast(msg, isError = false) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.toggle('error', isError);
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.hidden = true; }, isError ? 6000 : 3500);
+}
+
+function setBusy(msg) {
+  const b = $('busy');
+  b.hidden = !msg;
+  if (msg) b.textContent = msg;
+}
 
 function showErr(err) {
   console.error(err);
-  alert(`Error: ${err.message || err}`);
+  toast(`Error: ${err.message || err}`, true);
 }
 
 // --- spritesheet rendering ----------------------------------------------
@@ -418,6 +628,9 @@ async function renderSheet() {
 
   const renderCam = buildRenderCamera();
 
+  const renderBtn = $('render');
+  renderBtn.disabled = true;
+
   const wasRendering = isRendering;
   isRendering = true;
   const prevAction = action;
@@ -446,9 +659,15 @@ async function renderSheet() {
   let minX = internalSize, minY = internalSize, maxX = 0, maxY = 0;
   let foundContent = false;
 
+  const cols = layout === 'dir-rows' ? frames : dirs;
+  const rows = layout === 'dir-rows' ? dirs : frames;
+  const sheet = $('sheet');
+
+  try {
   for (let d = 0; d < dirs; d++) {
     pivot.rotation.y = dirAngles[d];
     for (let f = 0; f < frames; f++) {
+      renderBtn.textContent = `Rendering ${d * frames + f + 1}/${dirs * frames}…`;
       const t = tStart + tSpan * (f / frames);
       if (renderMixer) renderMixer.setTime(t);
       off.render(scene, renderCam);
@@ -501,9 +720,6 @@ async function renderSheet() {
   }
 
   // Pass 2: compose the spritesheet with optional bg fill + cropped+scaled draws.
-  const cols = layout === 'dir-rows' ? frames : dirs;
-  const rows = layout === 'dir-rows' ? dirs : frames;
-  const sheet = $('sheet');
   sheet.width = cols * size;
   sheet.height = rows * size;
   const ctx = sheet.getContext('2d');
@@ -530,16 +746,20 @@ async function renderSheet() {
     }
   }
 
-  pivot.rotation.y = startRot;
-  if (renderMixer) renderMixer.stopAllAction();
-  off.dispose();
-  isRendering = wasRendering;
+  } finally {
+    pivot.rotation.y = startRot;
+    if (renderMixer) renderMixer.stopAllAction();
+    off.dispose();
+    isRendering = wasRendering;
+    renderBtn.disabled = false;
+    renderBtn.textContent = 'Render spritesheet';
 
-  if (clip && mixer) {
-    action = mixer.clipAction(clip);
-    action.reset().play();
-  } else if (prevAction) {
-    prevAction.reset().play();
+    if (clip && mixer) {
+      action = mixer.clipAction(clip);
+      action.reset().play();
+    } else if (prevAction) {
+      prevAction.reset().play();
+    }
   }
 
   // Export blob.
@@ -594,6 +814,8 @@ async function renderSheet() {
   previewState = { dirs, frames, size, layout, fps: clamp(parseInt($('fps').value, 10) || 10, 1, 60), scale, dirAngles };
   previewStart = performance.now();
   buildPreviewLabels(dirAngles, size * scale);
+  document.body.classList.add('has-sheet');
+  toast(`Rendered ${dirs} × ${frames} spritesheet — download below`);
 }
 
 function buildPreviewLabels(dirAngles, cellW) {
@@ -725,7 +947,7 @@ async function discoverPresets() {
 
 async function applyPreset(filename) {
   if (!model) {
-    alert('Load a rigged model first, then apply a preset walk.');
+    toast('Load a rigged model first, then apply a preset animation.', true);
     return;
   }
   const url = PRESET_DIR + encodeURIComponent(filename);

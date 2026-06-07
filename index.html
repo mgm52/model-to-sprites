@@ -61,6 +61,30 @@
     color: #cfe1ff;
     pointer-events: auto;
   }
+  /* Once a model is loaded the hint only appears while dragging. */
+  body.has-model #drop-overlay:not(.active) { display: none; }
+  #busy {
+    position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+    background: rgba(15, 15, 15, 0.9); border: 1px solid #4a72b0; border-radius: 4px;
+    padding: 6px 14px; color: #cfe1ff; font-size: 12px; z-index: 5;
+  }
+  #busy::after {
+    content: '…';
+    display: inline-block; width: 1.2em; text-align: left;
+    animation: busy-dots 1s steps(4) infinite;
+    overflow: hidden; vertical-align: bottom; white-space: nowrap;
+  }
+  @keyframes busy-dots { from { width: 0; } to { width: 1.2em; } }
+  #toast {
+    position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%);
+    background: rgba(15, 15, 15, 0.92); border: 1px solid #446; border-radius: 4px;
+    padding: 6px 14px; color: #cfe1ff; font-size: 12px; z-index: 5;
+    max-width: 85%; text-align: center;
+  }
+  #toast.error { border-color: #a33; color: #ffd7d7; }
+  /* Hide 1×1 placeholder canvases & legend until there's something to show. */
+  #output canvas[width="1"] { display: none; }
+  body:not(.has-sheet) .preview-legend { display: none; }
   #output {
     padding: 12px;
     background: #0d0d0d;
@@ -151,6 +175,7 @@
 
   <h2>Camera</h2>
   <label><span>Pitch (°)</span><input id="pitch" type="number" value="30" step="1" min="0" max="89"></label>
+  <label><span>Brightness</span><input id="brightness" type="range" value="1" step="0.05" min="0.2" max="3"></label>
   <label><span>Distance</span><input id="distance" type="number" value="1.5" step="0.05" min="0.5" max="10"></label>
   <label><span>Vertical offset</span><input id="vshift" type="number" value="0" step="0.05"></label>
   <label><span>Projection</span>
@@ -196,7 +221,9 @@
 <div class="gutter v" id="gutter-x"></div>
 <main>
   <div id="viewport">
-    <div id="drop-overlay">drop .glb / .gltf / .fbx here</div>
+    <div id="drop-overlay">drop .glb / .gltf / .fbx here (or a whole folder with textures)</div>
+    <div id="busy" hidden></div>
+    <div id="toast" hidden></div>
   </div>
   <div class="gutter h" id="gutter-y"></div>
   <div id="output">
@@ -215,7 +242,7 @@
   </div>
 </main>
 
-<input type="file" id="model-input" accept=".glb,.gltf,.fbx" hidden>
+<input type="file" id="model-input" accept=".glb,.gltf,.fbx,.png,.jpg,.jpeg,.webp" multiple hidden>
 <input type="file" id="anim-input" accept=".glb,.gltf,.fbx" hidden>
 
 <script type="importmap">
