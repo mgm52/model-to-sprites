@@ -16,14 +16,32 @@ viewport.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 
 // Lights — keyed for a cartoon/3D-pixel-art readable look.
+// Key + fill live under a rig so they can optionally spin around the model
+// (hemisphere light is omnidirectional, so it stays outside).
 const hemi = new THREE.HemisphereLight(0xffffff, 0x404060, 0.7);
 scene.add(hemi);
+const lightRig = new THREE.Group();
+scene.add(lightRig);
 const key = new THREE.DirectionalLight(0xffffff, 1.2);
 key.position.set(3, 5, 3);
-scene.add(key);
+lightRig.add(key);
 const fill = new THREE.DirectionalLight(0x88aaff, 0.4);
 fill.position.set(-3, 2, -2);
-scene.add(fill);
+lightRig.add(fill);
+
+function lightSpinTurns() {
+  return $('light-spin').checked ? (parseFloat($('light-spin-turns').value) || 0) : 0;
+}
+
+$('light-spin').addEventListener('change', () => {
+  liveTime = 0; // restart the spin cycle so the preview starts from the key pose
+  // Static models get frames clamped to 1 on load; spinning the light makes
+  // extra frames meaningful again.
+  if ($('light-spin').checked && model && !clips.length && parseInt($('frames').value, 10) === 1) {
+    $('frames').value = 8;
+    toast('Light spin on — frames per direction restored to 8 (frames vary by lighting)');
+  }
+});
 
 // Brightness slider scales all lights — helps assets with dark textures.
 const BASE_LIGHTS = [[hemi, 0.7], [key, 1.2], [fill, 0.4]];
@@ -279,6 +297,9 @@ async function setModelFromFile(file) {
   scheduleTextureRescue(object);
   if (clips.length) {
     toast(`Loaded ${file.name} — ${clips.length} clip(s)`);
+  } else if (lightSpinTurns()) {
+    // Light spin makes frames differ even without animation.
+    toast(`Loaded ${file.name} — no animation (static); frames will vary by light spin`);
   } else {
     $('frames').value = 1; // static model: extra frames would be identical
     toast(`Loaded ${file.name} — no animation (static); frames per direction set to 1`);
@@ -443,16 +464,26 @@ function tick() {
   requestAnimationFrame(tick);
   if (isRendering) return; // render loop owns the frame
   const dt = clock.getDelta();
+  liveTime += dt;
+  let cycleSpan; // seconds per loop — drives the light spin below
   if (mixer && action) {
     const clip = action.getClip();
     const [tStart, tEnd] = trimRange(clip.duration);
-    const span = Math.max(0.0001, tEnd - tStart);
-    liveTime += dt;
-    const t = tStart + (liveTime % span);
+    cycleSpan = Math.max(0.0001, tEnd - tStart);
+    const t = tStart + (liveTime % cycleSpan);
     mixer.setTime(t);
-  } else if (mixer) {
-    mixer.update(dt);
+  } else {
+    if (mixer) mixer.update(dt);
+    // No clip playing: mirror what the render produces — `frames` frames
+    // played back at the preview FPS make one cycle.
+    const frames = clamp(parseInt($('frames').value, 10) || 1, 1, 64);
+    const fps = clamp(parseInt($('fps').value, 10) || 10, 1, 60);
+    cycleSpan = frames / fps;
   }
+  const turns = lightSpinTurns();
+  lightRig.rotation.y = turns
+    ? ((liveTime % cycleSpan) / cycleSpan) * turns * Math.PI * 2
+    : 0;
   controls.update();
   renderer.render(scene, camera);
 }
@@ -642,6 +673,10 @@ async function renderSheet() {
   }
 
   const startRot = pivot.rotation.y;
+  const startLightRot = lightRig.rotation.y;
+  // Light spin: `turns` full revolutions spread across each direction's frames.
+  // Works without a clip too — frames then differ only by lighting.
+  const spinTurns = lightSpinTurns();
 
   const dirAngles = [];
   for (let d = 0; d < dirs; d++) {
@@ -670,6 +705,7 @@ async function renderSheet() {
       renderBtn.textContent = `Rendering ${d * frames + f + 1}/${dirs * frames}…`;
       const t = tStart + tSpan * (f / frames);
       if (renderMixer) renderMixer.setTime(t);
+      lightRig.rotation.y = spinTurns ? spinTurns * Math.PI * 2 * (f / frames) : startLightRot;
       off.render(scene, renderCam);
 
       const buf = document.createElement('canvas');
@@ -748,6 +784,7 @@ async function renderSheet() {
 
   } finally {
     pivot.rotation.y = startRot;
+    lightRig.rotation.y = startLightRot;
     if (renderMixer) renderMixer.stopAllAction();
     off.dispose();
     isRendering = wasRendering;
@@ -794,6 +831,7 @@ async function renderSheet() {
     clockwise: cw,
     restForward,
     headings,
+    lightSpinTurns: spinTurns,
     cameraPitchDeg: parseFloat($('pitch').value) || 30,
     projection: $('projection').value,
     cols, rows,

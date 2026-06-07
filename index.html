@@ -176,6 +176,9 @@
   <h2>Camera</h2>
   <label><span>Pitch (°)</span><input id="pitch" type="number" value="30" step="1" min="0" max="89"></label>
   <label><span>Brightness</span><input id="brightness" type="range" value="1" step="0.05" min="0.2" max="3"></label>
+  <label><span>Spin light</span><input id="light-spin" type="checkbox"></label>
+  <label><span>Light turns / cycle</span><input id="light-spin-turns" type="number" value="1" step="0.25" min="-8" max="8"></label>
+  <p class="hint">Spins the key &amp; fill lights around the model across each direction's frames (negative = opposite way). Works on static models too — frames then differ by lighting only.</p>
   <label><span>Distance</span><input id="distance" type="number" value="1.5" step="0.05" min="0.5" max="10"></label>
   <label><span>Vertical offset</span><input id="vshift" type="number" value="0" step="0.05"></label>
   <label><span>Projection</span>
